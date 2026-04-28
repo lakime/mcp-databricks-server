@@ -10,6 +10,7 @@
   - [Unity Catalog Tools](#unity-catalog-exploration-tools)
   - [Lakeview Dashboard Tools](#lakeview-dashboard-tools)
   - [Lakebase (Postgres) Tools](#lakebase-postgres-tools)
+  - [Databricks Apps Tools](#databricks-apps-tools)
 - [Setup](#setup)
   - [System Requirements](#system-requirements)
   - [Installation](#installation)
@@ -185,6 +186,51 @@ lakebase_query("SELECT status, COUNT(*) FROM procurement.po_drafts GROUP BY stat
 → | status   | count |
   | DRAFT    | 12    |
   | APPROVED | 4     |
+```
+
+## Databricks Apps Tools
+
+This server can list, inspect, deploy, start, and stop **Databricks Apps** directly from conversation context.
+
+| Tool | Description |
+|---|---|
+| `list_databricks_apps()` | List all apps with state (`app=`, `compute=`) and URL |
+| `get_databricks_app(app_name)` | Full details: state, URL, active/pending deployment |
+| `deploy_databricks_app(app_name, source_code_path, mode?)` | Deploy an app from a workspace source path |
+| `list_databricks_app_deployments(app_name)` | Deployment history for an app |
+| `get_databricks_app_deployment(app_name, deployment_id)` | Poll a specific deployment status |
+| `start_databricks_app(app_name)` | Start a stopped app |
+| `stop_databricks_app(app_name)` | Stop a running app |
+
+### Deployment modes
+
+| Mode | Behaviour |
+|---|---|
+| `SNAPSHOT` (default) | Takes a point-in-time copy of the source path at deploy time |
+| `AUTO_SYNC` | Keeps the app continuously in sync with changes to the source path |
+
+### Deployment states
+
+A deployment progresses through: `IN_PROGRESS` → `SUCCEEDED` (or `FAILED` / `CANCELLED`).
+App compute states: `STARTING` → `ACTIVE` → `STOPPED` / `ERROR`.
+App application states: `DEPLOYING` → `RUNNING` / `CRASHED` / `UNAVAILABLE`.
+
+### Example workflow
+
+```
+list_databricks_apps()
+→ - **livezerobus** — app=RUNNING, compute=ACTIVE
+    URL: https://....azuredatabricks.net/driver-proxy/o/.../livezerobus/...
+
+get_databricks_app("livezerobus")
+→ Active deployment: 01abc... | Source: /Repos/main/LiveZerobus/backend
+
+deploy_databricks_app("livezerobus", "/Repos/main/LiveZerobus/backend")
+→ Deployment started — ID: 01def...
+
+get_databricks_app_deployment("livezerobus", "01def...")
+→ State: `IN_PROGRESS`   (poll again)
+→ State: `SUCCEEDED`
 ```
 
 ## Setup

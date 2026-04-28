@@ -24,6 +24,13 @@ from databricks_sdk_utils import (
     publish_lakeview_dashboard,
     trash_lakeview_dashboard,
     VALID_CHART_TYPES,
+    list_apps,
+    get_app,
+    deploy_app,
+    list_app_deployments,
+    get_app_deployment,
+    start_app,
+    stop_app,
 )
 
 
@@ -471,6 +478,118 @@ async def trash_dashboard(dashboard_id: str) -> str:
         return await asyncio.to_thread(trash_lakeview_dashboard, dashboard_id)
     except Exception as e:
         return f"Error trashing dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def list_databricks_apps() -> str:
+    """
+    Lists all Databricks Apps in the workspace with their names, states, and URLs.
+
+    Use this tool to discover what apps exist, whether they are running, and their URLs.
+    The output is formatted in Markdown.
+    """
+    try:
+        return await asyncio.to_thread(list_apps)
+    except Exception as e:
+        return f"Error listing apps: {str(e)}"
+
+
+@mcp.tool()
+async def get_databricks_app(app_name: str) -> str:
+    """
+    Gets full details of a specific Databricks App, including its current state,
+    URL, active deployment, and pending deployment (if any).
+
+    Args:
+        app_name: The name of the app (e.g. `livezerobus`).
+    """
+    try:
+        return await asyncio.to_thread(get_app, app_name)
+    except Exception as e:
+        return f"Error getting app '{app_name}': {str(e)}"
+
+
+@mcp.tool()
+async def deploy_databricks_app(
+    app_name: str,
+    source_code_path: str,
+    mode: Optional[str] = "SNAPSHOT",
+) -> str:
+    """
+    Deploys a Databricks App from a workspace source code path.
+
+    Args:
+        app_name: The name of the app to deploy.
+        source_code_path: Workspace path to the app source directory
+                          (e.g. `/Workspace/Users/you/my-app`).
+        mode: Deployment mode — `SNAPSHOT` (default) takes a point-in-time copy;
+              `AUTO_SYNC` keeps the app in sync with the source path.
+    """
+    try:
+        return await asyncio.to_thread(deploy_app, app_name, source_code_path, mode or "SNAPSHOT")
+    except Exception as e:
+        return f"Error deploying app '{app_name}': {str(e)}"
+
+
+@mcp.tool()
+async def list_databricks_app_deployments(app_name: str) -> str:
+    """
+    Lists all deployments for a Databricks App, newest first.
+
+    Use this to see the deployment history and check the status of past deployments.
+
+    Args:
+        app_name: The name of the app.
+    """
+    try:
+        return await asyncio.to_thread(list_app_deployments, app_name)
+    except Exception as e:
+        return f"Error listing deployments for '{app_name}': {str(e)}"
+
+
+@mcp.tool()
+async def get_databricks_app_deployment(app_name: str, deployment_id: str) -> str:
+    """
+    Gets the status of a specific Databricks App deployment.
+
+    Use this to poll a deployment until it reaches SUCCEEDED or FAILED state.
+
+    Args:
+        app_name: The name of the app.
+        deployment_id: The deployment ID returned by `deploy_databricks_app`.
+    """
+    try:
+        return await asyncio.to_thread(get_app_deployment, app_name, deployment_id)
+    except Exception as e:
+        return f"Error getting deployment: {str(e)}"
+
+
+@mcp.tool()
+async def start_databricks_app(app_name: str) -> str:
+    """
+    Starts a stopped Databricks App.
+
+    Args:
+        app_name: The name of the app to start.
+    """
+    try:
+        return await asyncio.to_thread(start_app, app_name)
+    except Exception as e:
+        return f"Error starting app '{app_name}': {str(e)}"
+
+
+@mcp.tool()
+async def stop_databricks_app(app_name: str) -> str:
+    """
+    Stops a running Databricks App.
+
+    Args:
+        app_name: The name of the app to stop.
+    """
+    try:
+        return await asyncio.to_thread(stop_app, app_name)
+    except Exception as e:
+        return f"Error stopping app '{app_name}': {str(e)}"
 
 
 if __name__ == "__main__":

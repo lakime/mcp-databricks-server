@@ -3,6 +3,11 @@ from databricks.sdk.core import Config
 from databricks.sdk.service.catalog import TableInfo, SchemaInfo, ColumnInfo, CatalogInfo
 from databricks.sdk.service.sql import StatementResponse, StatementState
 from databricks.sdk.service.dashboards import Dashboard
+from databricks.sdk.service.apps import (
+    App as DatabricksApp,
+    AppDeployment,
+    AppDeploymentMode,
+)
 from typing import Dict, Any, List, Optional
 import os
 import json
@@ -268,7 +273,7 @@ def _get_table_lineage(table_full_name: str) -> Dict[str, Any]:
     Retrieves table lineage information for a given table using the global SDK client
     and global SQL warehouse ID. Now includes notebook and job information with enhanced details.
     """
-    if not DATABRICKS_SQL_WAREHOUSE_ID:
+    if not DATABRICKS_SQL_WAREHOUSE_ID: # Check before attempting query
         return {"status": "error", "error": "DATABRICKS_SQL_WAREHOUSE_ID is not set. Cannot fetch lineage."}
 
     lineage_sql_query = f"""
@@ -279,6 +284,7 @@ def _get_table_lineage(table_full_name: str) -> Dict[str, Any]:
     ORDER BY event_time DESC LIMIT 100;
     """
     print(f"Fetching and processing lineage for table: {table_full_name}")
+    # execute_databricks_sql will now use the global warehouse_id
     raw_lineage_output = execute_databricks_sql(lineage_sql_query, wait_timeout='50s') 
     return _process_lineage_results(raw_lineage_output, table_full_name)
 
@@ -335,7 +341,7 @@ def execute_databricks_sql(sql_query: str, wait_timeout: str = '50s') -> Dict[st
         print(f"Executing SQL on warehouse {DATABRICKS_SQL_WAREHOUSE_ID} (timeout: {wait_timeout}):\n{sql_query[:200]}..." + (" (truncated)" if len(sql_query) > 200 else ""))
         response: StatementResponse = sdk_client.statement_execution.execute_statement(
             statement=sql_query,
-            warehouse_id=DATABRICKS_SQL_WAREHOUSE_ID,
+            warehouse_id=DATABRICKS_SQL_WAREHOUSE_ID, # Use global warehouse ID
             wait_timeout=wait_timeout
         )
 
@@ -357,6 +363,7 @@ def execute_databricks_sql(sql_query: str, wait_timeout: str = '50s') -> Dict[st
 def get_uc_table_details(full_table_name: str, include_lineage: bool = False) -> str:
     """
     Fetches table metadata and optionally lineage, then formats it into a Markdown string.
+    Uses the _format_single_table_md helper for core table structure.
     """
     print(f"Fetching metadata for {full_table_name}...")
     
@@ -420,6 +427,7 @@ def get_uc_table_details(full_table_name: str, include_lineage: bool = False) ->
 def get_uc_schema_details(catalog_name: str, schema_name: str, include_columns: bool = False) -> str:
     """
     Fetches detailed information for a specific schema, optionally including its tables and their columns.
+    Uses the global SDK client and the _format_single_table_md helper with appropriate heading levels.
     """
     full_schema_name = f"{catalog_name}.{schema_name}"
     markdown_parts = [f"# Schema Details: **{full_schema_name}**"]
@@ -470,14 +478,18 @@ def get_uc_schema_details(catalog_name: str, schema_name: str, include_columns: 
 
 def get_uc_catalog_details(catalog_name: str) -> str:
     """
-    Fetches and formats a summary of all schemas within a given catalog.
+    Fetches and formats a summary of all schemas within a given catalog
+    using the global SDK client.
     """
     markdown_parts = [f"# Catalog Summary: **{catalog_name}**", ""]
     schemas_found_count = 0
     
     try:
         print(f"Fetching schemas for catalog: {catalog_name} using global sdk_client...")
+        # The sdk_client is globally defined in this module
         schemas_iterable = sdk_client.schemas.list(catalog_name=catalog_name)
+        
+        # Convert iterator to list to easily check if empty and get a count
         schemas_list = list(schemas_iterable) 
 
         if not schemas_list:
@@ -493,17 +505,19 @@ def get_uc_catalog_details(catalog_name: str) -> str:
                 print(f"Warning: Encountered an unexpected item in schemas list: {type(schema_info)}")
                 continue
 
+            # Start of a schema item in the list
             schema_name_display = schema_info.full_name if schema_info.full_name else "Unnamed Schema"
-            markdown_parts.append(f"## {schema_name_display}")
+            markdown_parts.append(f"## {schema_name_display}") # Main bullet point for schema name
                         
             description = f"**Description**: {schema_info.comment}" if schema_info.comment else ""
             markdown_parts.append(description)
             
-            markdown_parts.append("")
+            markdown_parts.append("") # Add a blank line for separation between schemas, or remove if too much space
 
     except Exception as e:
         error_message = f"Failed to retrieve schemas for catalog '{catalog_name}': {str(e)}"
         print(f"Error in get_catalog_summary: {error_message}")
+        # Return a structured error message in Markdown
         return f"""# Error: Could Not Retrieve Catalog Summary
 **Catalog:** `{catalog_name}`
 **Problem:** An error occurred while attempting to fetch schema information.
@@ -514,6 +528,7 @@ def get_uc_catalog_details(catalog_name: str) -> str:
     
     markdown_parts.append(f"**Total Schemas Found in `{catalog_name}`**: {schemas_found_count}")
     return "\n".join(markdown_parts)
+
 
 
 def _build_counter_dashboard_json(sql_query: str, value_field: str, dataset_display_name: str,
@@ -533,6 +548,7 @@ def _build_counter_dashboard_json(sql_query: str, value_field: str, dataset_disp
     if description:
         frame["showDescription"] = True
         frame["description"] = description
+    # Field name mirrors what Databricks auto-generates for aggregation expressions
     agg_field_name = f"{agg_fn.lower()}({value_field})"
     agg_expression = f"{agg_fn}(`{value_field}`)"
     dashboard_def = {
@@ -618,7 +634,7 @@ def _build_chart_dashboard_json(sql_query: str, chart_type: str, x_field: str, y
                                     "query": {
                                         "datasetName": ds_name,
                                         "fields": fields,
-                                        "disaggregated": True,
+                                        "disaggregated": True,  # dataset is pre-grouped in SQL
                                     }
                                 }
                             ],
@@ -775,8 +791,7 @@ def create_multi_widget_dashboard(display_name: str, widgets: List[Dict[str, Any
       x_field     : (chart only) column for x axis
       y_field     : (chart only) column for y axis
       description : (counter, optional) subtitle
-      agg_fn      : (counter, optional) SUM (default), MAX, MIN, COUNT
-      x, y, w, h  : grid position and size (grid is 6 wide; counters default h=3, charts h=6)
+      x, y, w, h  : grid position and size (default: auto-stacked, w=6, h=6 for charts / h=3 for counters)
     """
     page_name = f"page_{uuid.uuid4().hex[:8]}"
     datasets = []
@@ -921,9 +936,175 @@ def trash_lakeview_dashboard(dashboard_id: str) -> str:
         return f"Error trashing dashboard '{dashboard_id}': {str(e)}"
 
 
+# ---------------------------------------------------------------------------
+# Databricks Apps helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_app_state(app) -> str:
+    """Return a compact state string for an App object."""
+    parts = []
+    if app.app_status and app.app_status.state:
+        parts.append(f"app={app.app_status.state.value}")
+    if app.compute_status and app.compute_status.state:
+        parts.append(f"compute={app.compute_status.state.value}")
+    return ", ".join(parts) if parts else "unknown"
+
+
+def _fmt_deployment(d: Optional[AppDeployment], label: str = "") -> List[str]:
+    """Format a single AppDeployment into markdown lines."""
+    if d is None:
+        return []
+    prefix = f"**{label}**: " if label else ""
+    state_msg = ""
+    if d.status:
+        state = d.status.state.value if d.status.state else "?"
+        msg = f" — {d.status.message}" if d.status.message else ""
+        state_msg = f"`{state}`{msg}"
+    lines = [f"{prefix}Deployment `{d.deployment_id or 'pending'}`"]
+    if state_msg:
+        lines.append(f"  - State: {state_msg}")
+    if d.source_code_path:
+        lines.append(f"  - Source: `{d.source_code_path}`")
+    if d.mode:
+        lines.append(f"  - Mode: `{d.mode.value}`")
+    if d.create_time:
+        lines.append(f"  - Created: `{d.create_time}`")
+    if d.creator:
+        lines.append(f"  - By: {d.creator}")
+    return lines
+
+
+def list_apps() -> str:
+    """Lists all Databricks Apps in the workspace."""
+    try:
+        apps = list(sdk_client.apps.list())
+        if not apps:
+            return "# Databricks Apps\n\nNo apps found in this workspace."
+        lines = ["# Databricks Apps", ""]
+        for app in apps:
+            state = _fmt_app_state(app)
+            lines.append(f"- **{app.name}** — {state}")
+            if getattr(app, "url", None):
+                lines.append(f"  - URL: {app.url}")
+            if app.description:
+                lines.append(f"  - Description: {app.description}")
+            if app.active_deployment and app.active_deployment.source_code_path:
+                lines.append(f"  - Source: `{app.active_deployment.source_code_path}`")
+            if app.create_time:
+                lines.append(f"  - Created: `{app.create_time}`")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing apps: {str(e)}"
+
+
+def get_app(app_name: str) -> str:
+    """Gets full details of a specific Databricks App."""
+    try:
+        app = sdk_client.apps.get(name=app_name)
+        lines = [f"# App: {app.name}", ""]
+        if app.description:
+            lines.append(f"**Description**: {app.description}")
+        lines.append(f"**State**: {_fmt_app_state(app)}")
+        if app.app_status and app.app_status.message:
+            lines.append(f"**Status message**: {app.app_status.message}")
+        if getattr(app, "url", None):
+            lines.append(f"**URL**: {app.url}")
+        if app.default_source_code_path:
+            lines.append(f"**Default source path**: `{app.default_source_code_path}`")
+        if app.service_principal_id:
+            lines.append(f"**Service principal ID**: `{app.service_principal_id}`")
+        if app.create_time:
+            lines.append(f"**Created**: `{app.create_time}` by {app.creator or '?'}")
+        if app.active_deployment:
+            lines.append("")
+            lines.extend(_fmt_deployment(app.active_deployment, "Active deployment"))
+        if app.pending_deployment:
+            lines.append("")
+            lines.extend(_fmt_deployment(app.pending_deployment, "Pending deployment"))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting app '{app_name}': {str(e)}"
+
+
+def deploy_app(app_name: str, source_code_path: str, mode: str = "SNAPSHOT") -> str:
+    """Deploys a Databricks App from a workspace source path."""
+    try:
+        mode_enum = AppDeploymentMode(mode.upper())
+    except ValueError:
+        return f"Invalid mode '{mode}'. Must be SNAPSHOT or AUTO_SYNC."
+    try:
+        dep = sdk_client.apps.deploy(
+            app_name=app_name,
+            app_deployment=AppDeployment(
+                source_code_path=source_code_path,
+                mode=mode_enum,
+            ),
+        )
+        lines = [f"# Deployment started: {app_name}", ""]
+        lines.append(f"- **Deployment ID**: `{dep.deployment_id or 'pending'}`")
+        if dep.status and dep.status.state:
+            lines.append(f"- **State**: `{dep.status.state.value}`")
+        if dep.source_code_path:
+            lines.append(f"- **Source**: `{dep.source_code_path}`")
+        if dep.mode:
+            lines.append(f"- **Mode**: `{dep.mode.value}`")
+        lines.append(
+            "\nUse `get_app_deployment` to poll the deployment status, "
+            "or `get_app` to see the app's overall state."
+        )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error deploying app '{app_name}': {str(e)}"
+
+
+def list_app_deployments(app_name: str) -> str:
+    """Lists all deployments for a Databricks App, newest first."""
+    try:
+        deps = list(sdk_client.apps.list_deployments(app_name=app_name))
+        if not deps:
+            return f"# Deployments for `{app_name}`\n\nNo deployments found."
+        lines = [f"# Deployments for `{app_name}`", ""]
+        for d in deps:
+            lines.extend(_fmt_deployment(d))
+            lines.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing deployments for '{app_name}': {str(e)}"
+
+
+def get_app_deployment(app_name: str, deployment_id: str) -> str:
+    """Gets status of a specific Databricks App deployment."""
+    try:
+        d = sdk_client.apps.get_deployment(app_name=app_name, deployment_id=deployment_id)
+        lines = [f"# Deployment: `{deployment_id}`", f"**App**: {app_name}", ""]
+        lines.extend(_fmt_deployment(d))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting deployment '{deployment_id}' for '{app_name}': {str(e)}"
+
+
+def start_app(app_name: str) -> str:
+    """Starts a stopped Databricks App."""
+    try:
+        sdk_client.apps.start(name=app_name)
+        return f"Start request sent for app `{app_name}`. Use `get_app` to monitor state."
+    except Exception as e:
+        return f"Error starting app '{app_name}': {str(e)}"
+
+
+def stop_app(app_name: str) -> str:
+    """Stops a running Databricks App."""
+    try:
+        sdk_client.apps.stop(name=app_name)
+        return f"Stop request sent for app `{app_name}`. Use `get_app` to monitor state."
+    except Exception as e:
+        return f"Error stopping app '{app_name}': {str(e)}"
+
+
 def get_uc_all_catalogs_summary() -> str:
     """
     Fetches a summary of all available Unity Catalogs, including their names, comments, and types.
+    Uses the global SDK client.
     """
     markdown_parts = ["# Available Unity Catalogs", ""]
     catalogs_found_count = 0
@@ -953,11 +1134,11 @@ def get_uc_all_catalogs_summary() -> str:
             catalog_type_str = "N/A"
             if catalog_info.catalog_type and hasattr(catalog_info.catalog_type, 'value'):
                 catalog_type_str = catalog_info.catalog_type.value
-            elif catalog_info.catalog_type:
+            elif catalog_info.catalog_type: # Fallback if it's not an Enum but has a direct string representation
                 catalog_type_str = str(catalog_info.catalog_type)
             markdown_parts.append(f"  - **Type**: `{catalog_type_str}`")
             
-            markdown_parts.append("")
+            markdown_parts.append("") # Add a blank line for separation
 
     except Exception as e:
         error_message = f"Failed to retrieve catalog list: {str(e)}"
