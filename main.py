@@ -7,7 +7,17 @@ from databricks_sdk_utils import (
     get_uc_catalog_details,
     get_uc_schema_details,
     execute_databricks_sql,
-    get_uc_all_catalogs_summary
+    get_uc_all_catalogs_summary,
+    list_lakeview_dashboards,
+    get_lakeview_dashboard,
+    create_lakeview_dashboard,
+    create_table_dashboard,
+    create_counter_dashboard,
+    create_chart_dashboard,
+    create_multi_widget_dashboard,
+    publish_lakeview_dashboard,
+    trash_lakeview_dashboard,
+    VALID_CHART_TYPES,
 )
 
 
@@ -40,7 +50,6 @@ async def execute_sql_query(sql: str) -> str:
         elif status == "success":
             return format_query_results(sdk_result)
         else:
-            # Should not happen if execute_databricks_sql always returns a known status
             return f"Received an unexpected status from query execution: {status}. Result: {sdk_result}"
             
     except Exception as e:
@@ -165,6 +174,236 @@ async def list_uc_catalogs() -> str:
         return f"Error initializing Databricks SDK utilities: {str(e)}. Please ensure DATABRICKS_HOST and DATABRICKS_TOKEN are set."
     except Exception as e:
         return f"Error listing catalogs: {str(e)}"
+
+@mcp.tool()
+async def list_dashboards() -> str:
+    """
+    Lists all Lakeview dashboards in the Databricks workspace.
+
+    Use this tool to discover existing dashboards, their names, IDs, and lifecycle states.
+    The output is formatted in Markdown.
+    """
+    try:
+        return await asyncio.to_thread(list_lakeview_dashboards)
+    except Exception as e:
+        return f"Error listing dashboards: {str(e)}"
+
+
+@mcp.tool()
+async def get_dashboard(dashboard_id: str) -> str:
+    """
+    Gets details of a specific Lakeview dashboard, including its datasets and page structure.
+
+    Args:
+        dashboard_id: The dashboard ID (e.g. `01efd...`).
+    """
+    try:
+        return await asyncio.to_thread(get_lakeview_dashboard, dashboard_id)
+    except Exception as e:
+        return f"Error getting dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def create_dashboard(
+    display_name: str,
+    serialized_dashboard: str,
+    warehouse_id: Optional[str] = None,
+) -> str:
+    """
+    Creates a Lakeview dashboard from a fully specified serialized dashboard JSON string.
+
+    Use this when you have already constructed the complete dashboard definition JSON.
+    For a quick single-table dashboard from a SQL query, use `create_table_dashboard` instead.
+
+    The serialized_dashboard must be a JSON string with this structure:
+    {
+      "datasets": [{"name": "ds_id", "displayName": "...", "query": "SELECT ..."}],
+      "pages": [{"name": "page_id", "displayName": "...", "layout": [...widgets...]}]
+    }
+
+    Args:
+        display_name: Human-readable name for the dashboard.
+        serialized_dashboard: JSON string defining datasets, pages, and widgets.
+        warehouse_id: Optional SQL warehouse ID to attach. Uses the default warehouse if omitted.
+    """
+    try:
+        return await asyncio.to_thread(create_lakeview_dashboard, display_name, serialized_dashboard, warehouse_id)
+    except Exception as e:
+        return f"Error creating dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def create_table_dashboard(
+    display_name: str,
+    sql_query: str,
+    warehouse_id: Optional[str] = None,
+    dataset_display_name: Optional[str] = None,
+    table_title: Optional[str] = None,
+) -> str:
+    """
+    Creates a Lakeview dashboard with a single table visualization from a SQL query.
+
+    This is the quickest way to turn a SQL query into a dashboard. It auto-generates
+    the dashboard JSON with one dataset and one table widget.
+
+    Args:
+        display_name: Human-readable name for the dashboard.
+        sql_query: The SQL query that populates the table.
+        warehouse_id: Optional SQL warehouse ID to attach.
+        dataset_display_name: Optional label for the dataset (defaults to display_name).
+        table_title: Optional title shown above the table widget (defaults to display_name).
+    """
+    try:
+        return await asyncio.to_thread(
+            create_table_dashboard,
+            display_name, sql_query, warehouse_id, dataset_display_name, table_title
+        )
+    except Exception as e:
+        return f"Error creating table dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def create_counter_dashboard(
+    display_name: str,
+    sql_query: str,
+    value_field: str,
+    warehouse_id: Optional[str] = None,
+    dataset_display_name: Optional[str] = None,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+) -> str:
+    """
+    Creates a Lakeview dashboard with a single counter (KPI / metric card) widget.
+
+    The SQL query should return a single row with a numeric column that becomes
+    the big displayed number. Typical use: `SELECT COUNT(*) AS total FROM ...`
+    or `SELECT SUM(amount) AS revenue FROM ...`.
+
+    Args:
+        display_name: Human-readable name for the dashboard.
+        sql_query: SQL that returns the metric value (should yield one row).
+        value_field: Column name from the query to display as the metric (e.g. `total`, `revenue`).
+        warehouse_id: Optional SQL warehouse ID to attach.
+        dataset_display_name: Optional label for the dataset (defaults to display_name).
+        title: Optional title shown above the counter widget (defaults to display_name).
+        description: Optional subtitle shown below the counter value.
+    """
+    try:
+        return await asyncio.to_thread(
+            create_counter_dashboard,
+            display_name, sql_query, value_field, warehouse_id,
+            dataset_display_name, title, description,
+        )
+    except Exception as e:
+        return f"Error creating counter dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def create_chart_dashboard(
+    display_name: str,
+    sql_query: str,
+    chart_type: str,
+    x_field: str,
+    y_field: str,
+    warehouse_id: Optional[str] = None,
+    dataset_display_name: Optional[str] = None,
+    title: Optional[str] = None,
+    color_field: Optional[str] = None,
+) -> str:
+    """
+    Creates a Lakeview dashboard with a single chart visualization.
+
+    Supported chart_type values: bar, line, area, scatter, pie.
+
+    Args:
+        display_name: Human-readable name for the dashboard.
+        sql_query: SQL that returns the data to visualize.
+        chart_type: One of: bar, line, area, scatter, pie.
+        x_field: Column name to use for the X axis (or pie category).
+        y_field: Column name to use for the Y axis (or pie value).
+        warehouse_id: Optional SQL warehouse ID to attach.
+        dataset_display_name: Optional label for the dataset (defaults to display_name).
+        title: Optional title shown above the chart (defaults to display_name).
+        color_field: Optional column to use for color grouping / series splitting.
+    """
+    valid = sorted(VALID_CHART_TYPES)
+    if chart_type not in VALID_CHART_TYPES:
+        return f"Invalid chart_type '{chart_type}'. Must be one of: {valid}"
+    try:
+        return await asyncio.to_thread(
+            create_chart_dashboard,
+            display_name, sql_query, chart_type, x_field, y_field,
+            warehouse_id, dataset_display_name, title, color_field,
+        )
+    except Exception as e:
+        return f"Error creating chart dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def publish_dashboard(dashboard_id: str, warehouse_id: Optional[str] = None) -> str:
+    """
+    Publishes a Lakeview dashboard draft so it is accessible to viewers.
+
+    Newly created dashboards are in draft state. Call this after `create_dashboard`
+    or `create_table_dashboard` to make the dashboard publicly visible.
+
+    Args:
+        dashboard_id: The dashboard ID returned by create_dashboard.
+        warehouse_id: Optional SQL warehouse ID to use for the published version.
+    """
+    try:
+        return await asyncio.to_thread(publish_lakeview_dashboard, dashboard_id, warehouse_id)
+    except Exception as e:
+        return f"Error publishing dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def create_multi_widget_dashboard(
+    display_name: str,
+    widgets: list,
+    warehouse_id: Optional[str] = None,
+) -> str:
+    """
+    Creates a Lakeview dashboard with multiple widgets (counters + charts) on one page.
+
+    Each item in `widgets` is an object with:
+      type        : "counter" | "bar" | "line" | "area" | "scatter" | "pie"
+      sql_query   : SQL for this widget's data
+      title       : Widget title
+      value_field : (counter) column to show as the big number
+      x_field     : (chart) column for x axis
+      y_field     : (chart) column for y axis
+      description : (counter, optional) subtitle text
+      agg_fn      : (counter, optional) aggregation to apply — SUM (default), MAX, MIN, COUNT
+      x, y, w, h  : grid position/size (grid is 6 wide; counters default h=3, charts h=6)
+
+    Example widgets list:
+    [
+      {"type": "counter", "sql_query": "SELECT COUNT(*) AS n FROM t", "value_field": "n",
+       "title": "Total", "x": 0, "y": 0, "w": 2, "h": 3},
+      {"type": "bar", "sql_query": "SELECT cat, SUM(v) AS total FROM t GROUP BY cat",
+       "x_field": "cat", "y_field": "total", "title": "By Category", "x": 0, "y": 3, "w": 6, "h": 6}
+    ]
+    """
+    try:
+        return await asyncio.to_thread(create_multi_widget_dashboard, display_name, widgets, warehouse_id)
+    except Exception as e:
+        return f"Error creating multi-widget dashboard: {str(e)}"
+
+
+@mcp.tool()
+async def trash_dashboard(dashboard_id: str) -> str:
+    """
+    Moves a Lakeview dashboard to trash (soft delete).
+
+    Args:
+        dashboard_id: The dashboard ID to trash.
+    """
+    try:
+        return await asyncio.to_thread(trash_lakeview_dashboard, dashboard_id)
+    except Exception as e:
+        return f"Error trashing dashboard: {str(e)}"
+
 
 if __name__ == "__main__":
     mcp.run(transport='stdio')

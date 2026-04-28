@@ -2,10 +2,12 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 from databricks.sdk.service.catalog import TableInfo, SchemaInfo, ColumnInfo, CatalogInfo
 from databricks.sdk.service.sql import StatementResponse, StatementState
-from typing import Dict, Any, List
+from databricks.sdk.service.dashboards import Dashboard
+from typing import Dict, Any, List, Optional
 import os
 import json
 import time
+import uuid
 from dotenv import load_dotenv
 
 # Load environment variables from .env file when the module is imported
@@ -266,7 +268,7 @@ def _get_table_lineage(table_full_name: str) -> Dict[str, Any]:
     Retrieves table lineage information for a given table using the global SDK client
     and global SQL warehouse ID. Now includes notebook and job information with enhanced details.
     """
-    if not DATABRICKS_SQL_WAREHOUSE_ID: # Check before attempting query
+    if not DATABRICKS_SQL_WAREHOUSE_ID:
         return {"status": "error", "error": "DATABRICKS_SQL_WAREHOUSE_ID is not set. Cannot fetch lineage."}
 
     lineage_sql_query = f"""
@@ -277,7 +279,6 @@ def _get_table_lineage(table_full_name: str) -> Dict[str, Any]:
     ORDER BY event_time DESC LIMIT 100;
     """
     print(f"Fetching and processing lineage for table: {table_full_name}")
-    # execute_databricks_sql will now use the global warehouse_id
     raw_lineage_output = execute_databricks_sql(lineage_sql_query, wait_timeout='50s') 
     return _process_lineage_results(raw_lineage_output, table_full_name)
 
@@ -334,7 +335,7 @@ def execute_databricks_sql(sql_query: str, wait_timeout: str = '50s') -> Dict[st
         print(f"Executing SQL on warehouse {DATABRICKS_SQL_WAREHOUSE_ID} (timeout: {wait_timeout}):\n{sql_query[:200]}..." + (" (truncated)" if len(sql_query) > 200 else ""))
         response: StatementResponse = sdk_client.statement_execution.execute_statement(
             statement=sql_query,
-            warehouse_id=DATABRICKS_SQL_WAREHOUSE_ID, # Use global warehouse ID
+            warehouse_id=DATABRICKS_SQL_WAREHOUSE_ID,
             wait_timeout=wait_timeout
         )
 
@@ -356,7 +357,6 @@ def execute_databricks_sql(sql_query: str, wait_timeout: str = '50s') -> Dict[st
 def get_uc_table_details(full_table_name: str, include_lineage: bool = False) -> str:
     """
     Fetches table metadata and optionally lineage, then formats it into a Markdown string.
-    Uses the _format_single_table_md helper for core table structure.
     """
     print(f"Fetching metadata for {full_table_name}...")
     
@@ -420,7 +420,6 @@ def get_uc_table_details(full_table_name: str, include_lineage: bool = False) ->
 def get_uc_schema_details(catalog_name: str, schema_name: str, include_columns: bool = False) -> str:
     """
     Fetches detailed information for a specific schema, optionally including its tables and their columns.
-    Uses the global SDK client and the _format_single_table_md helper with appropriate heading levels.
     """
     full_schema_name = f"{catalog_name}.{schema_name}"
     markdown_parts = [f"# Schema Details: **{full_schema_name}**"]
@@ -471,18 +470,14 @@ def get_uc_schema_details(catalog_name: str, schema_name: str, include_columns: 
 
 def get_uc_catalog_details(catalog_name: str) -> str:
     """
-    Fetches and formats a summary of all schemas within a given catalog
-    using the global SDK client.
+    Fetches and formats a summary of all schemas within a given catalog.
     """
     markdown_parts = [f"# Catalog Summary: **{catalog_name}**", ""]
     schemas_found_count = 0
     
     try:
         print(f"Fetching schemas for catalog: {catalog_name} using global sdk_client...")
-        # The sdk_client is globally defined in this module
         schemas_iterable = sdk_client.schemas.list(catalog_name=catalog_name)
-        
-        # Convert iterator to list to easily check if empty and get a count
         schemas_list = list(schemas_iterable) 
 
         if not schemas_list:
@@ -498,19 +493,17 @@ def get_uc_catalog_details(catalog_name: str) -> str:
                 print(f"Warning: Encountered an unexpected item in schemas list: {type(schema_info)}")
                 continue
 
-            # Start of a schema item in the list
             schema_name_display = schema_info.full_name if schema_info.full_name else "Unnamed Schema"
-            markdown_parts.append(f"## {schema_name_display}") # Main bullet point for schema name
+            markdown_parts.append(f"## {schema_name_display}")
                         
             description = f"**Description**: {schema_info.comment}" if schema_info.comment else ""
             markdown_parts.append(description)
             
-            markdown_parts.append("") # Add a blank line for separation between schemas, or remove if too much space
+            markdown_parts.append("")
 
     except Exception as e:
         error_message = f"Failed to retrieve schemas for catalog '{catalog_name}': {str(e)}"
         print(f"Error in get_catalog_summary: {error_message}")
-        # Return a structured error message in Markdown
         return f"""# Error: Could Not Retrieve Catalog Summary
 **Catalog:** `{catalog_name}`
 **Problem:** An error occurred while attempting to fetch schema information.
@@ -523,11 +516,414 @@ def get_uc_catalog_details(catalog_name: str) -> str:
     return "\n".join(markdown_parts)
 
 
+def _build_counter_dashboard_json(sql_query: str, value_field: str, dataset_display_name: str,
+                                   title: str, description: Optional[str] = None,
+                                   agg_fn: str = "SUM") -> str:
+    """
+    Build a Lakeview dashboard JSON for a single counter (KPI metric) widget.
+
+    The widget applies `agg_fn(value_field)` over the dataset rows, matching the
+    pattern that Lakeview requires (disaggregated=false + real aggregation expression).
+    For pre-aggregated queries returning a single row, SUM/MAX/MIN all give the same result.
+    """
+    ds_name = f"ds_{uuid.uuid4().hex[:8]}"
+    page_name = f"page_{uuid.uuid4().hex[:8]}"
+    widget_name = f"widget_{uuid.uuid4().hex[:8]}"
+    frame: Dict[str, Any] = {"showTitle": True, "title": title}
+    if description:
+        frame["showDescription"] = True
+        frame["description"] = description
+    agg_field_name = f"{agg_fn.lower()}({value_field})"
+    agg_expression = f"{agg_fn}(`{value_field}`)"
+    dashboard_def = {
+        "datasets": [
+            {"name": ds_name, "displayName": dataset_display_name, "query": sql_query}
+        ],
+        "pages": [
+            {
+                "name": page_name,
+                "displayName": "Overview",
+                "layout": [
+                    {
+                        "widget": {
+                            "name": widget_name,
+                            "queries": [
+                                {
+                                    "name": "main_query",
+                                    "query": {
+                                        "datasetName": ds_name,
+                                        "fields": [{"name": agg_field_name, "expression": agg_expression}],
+                                        "disaggregated": False,
+                                    }
+                                }
+                            ],
+                            "spec": {
+                                "version": 2,
+                                "widgetType": "counter",
+                                "encodings": {
+                                    "value": {"fieldName": agg_field_name, "displayName": title}
+                                },
+                                "frame": frame,
+                            }
+                        },
+                        "position": {"x": 0, "y": 0, "width": 2, "height": 3}
+                    }
+                ]
+            }
+        ]
+    }
+    return json.dumps(dashboard_def)
+
+
+VALID_CHART_TYPES = {"bar", "line", "area", "scatter", "pie"}
+
+def _build_chart_dashboard_json(sql_query: str, chart_type: str, x_field: str, y_field: str,
+                                 dataset_display_name: str, title: str,
+                                 color_field: Optional[str] = None) -> str:
+    """Build a Lakeview dashboard JSON for a bar/line/area/scatter/pie chart widget."""
+    if chart_type not in VALID_CHART_TYPES:
+        raise ValueError(f"chart_type must be one of {sorted(VALID_CHART_TYPES)}, got '{chart_type}'")
+    ds_name = f"ds_{uuid.uuid4().hex[:8]}"
+    page_name = f"page_{uuid.uuid4().hex[:8]}"
+    widget_name = f"widget_{uuid.uuid4().hex[:8]}"
+    fields = [
+        {"name": x_field, "expression": f"`{x_field}`"},
+        {"name": y_field, "expression": f"`{y_field}`"},
+    ]
+    encodings: Dict[str, Any] = {
+        "x": {"fieldName": x_field, "displayName": x_field,
+              "axis": {"title": x_field}, "scale": {"type": "categorical"}},
+        "y": {"fieldName": y_field, "displayName": y_field,
+              "axis": {"title": y_field}, "scale": {"type": "quantitative"}},
+    }
+    if color_field:
+        fields.append({"name": color_field, "expression": f"`{color_field}`"})
+        encodings["color"] = {"fieldName": color_field, "displayName": color_field,
+                               "scale": {"type": "categorical"}}
+    dashboard_def = {
+        "datasets": [
+            {"name": ds_name, "displayName": dataset_display_name, "query": sql_query}
+        ],
+        "pages": [
+            {
+                "name": page_name,
+                "displayName": "Overview",
+                "layout": [
+                    {
+                        "widget": {
+                            "name": widget_name,
+                            "queries": [
+                                {
+                                    "name": "main_query",
+                                    "query": {
+                                        "datasetName": ds_name,
+                                        "fields": fields,
+                                        "disaggregated": True,
+                                    }
+                                }
+                            ],
+                            "spec": {
+                                "version": 3,
+                                "widgetType": chart_type,
+                                "encodings": encodings,
+                                "frame": {"showTitle": True, "title": title},
+                            }
+                        },
+                        "position": {"x": 0, "y": 0, "width": 6, "height": 6}
+                    }
+                ]
+            }
+        ]
+    }
+    return json.dumps(dashboard_def)
+
+
+def _build_table_dashboard_json(sql_query: str, dataset_display_name: str, table_title: str) -> str:
+    """Build a minimal Lakeview dashboard JSON for a single table visualization."""
+    ds_name = f"ds_{uuid.uuid4().hex[:8]}"
+    page_name = f"page_{uuid.uuid4().hex[:8]}"
+    widget_name = f"widget_{uuid.uuid4().hex[:8]}"
+    dashboard_def = {
+        "datasets": [
+            {"name": ds_name, "displayName": dataset_display_name, "query": sql_query}
+        ],
+        "pages": [
+            {
+                "name": page_name,
+                "displayName": "Overview",
+                "layout": [
+                    {
+                        "widget": {
+                            "name": widget_name,
+                            "queries": [
+                                {
+                                    "name": "main",
+                                    "query": {"datasetName": ds_name, "disaggregated": True}
+                                }
+                            ],
+                            "spec": {
+                                "version": 3,
+                                "widgetType": "table",
+                                "encodings": {},
+                                "frame": {"showTitle": True, "title": table_title}
+                            }
+                        },
+                        "position": {"x": 0, "y": 0, "width": 6, "height": 6}
+                    }
+                ]
+            }
+        ]
+    }
+    return json.dumps(dashboard_def)
+
+
+def list_lakeview_dashboards() -> str:
+    """Lists all Lakeview dashboards in the workspace."""
+    try:
+        dashboards = list(sdk_client.lakeview.list())
+        if not dashboards:
+            return "# Lakeview Dashboards\n\nNo dashboards found."
+        lines = ["# Lakeview Dashboards", ""]
+        for d in dashboards:
+            lines.append(f"- **{d.display_name}** — ID: `{d.dashboard_id}`")
+            if d.lifecycle_state:
+                state = d.lifecycle_state.value if hasattr(d.lifecycle_state, 'value') else str(d.lifecycle_state)
+                lines.append(f"  - State: `{state}`")
+            if hasattr(d, 'path') and d.path:
+                lines.append(f"  - Path: `{d.path}`")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing dashboards: {str(e)}"
+
+
+def get_lakeview_dashboard(dashboard_id: str) -> str:
+    """Gets details of a specific Lakeview dashboard."""
+    try:
+        d = sdk_client.lakeview.get(dashboard_id=dashboard_id)
+        lines = [f"# Dashboard: {d.display_name}", ""]
+        lines.append(f"- **ID**: `{d.dashboard_id}`")
+        if d.lifecycle_state:
+            state = d.lifecycle_state.value if hasattr(d.lifecycle_state, 'value') else str(d.lifecycle_state)
+            lines.append(f"- **State**: `{state}`")
+        if hasattr(d, 'warehouse_id') and d.warehouse_id:
+            lines.append(f"- **Warehouse ID**: `{d.warehouse_id}`")
+        if hasattr(d, 'path') and d.path:
+            lines.append(f"- **Path**: `{d.path}`")
+        if hasattr(d, 'create_time') and d.create_time:
+            lines.append(f"- **Created**: `{d.create_time}`")
+        if hasattr(d, 'update_time') and d.update_time:
+            lines.append(f"- **Updated**: `{d.update_time}`")
+        if d.serialized_dashboard:
+            try:
+                parsed = json.loads(d.serialized_dashboard)
+                datasets = parsed.get("datasets", [])
+                pages = parsed.get("pages", [])
+                lines.append(f"\n## Structure")
+                lines.append(f"- **Datasets**: {len(datasets)}")
+                for ds in datasets:
+                    lines.append(f"  - `{ds.get('displayName', ds.get('name', '?'))}`: `{ds.get('query', '')[:120]}`")
+                lines.append(f"- **Pages**: {len(pages)}")
+                for pg in pages:
+                    widget_count = len(pg.get("layout", []))
+                    lines.append(f"  - `{pg.get('displayName', pg.get('name', '?'))}` ({widget_count} widget(s))")
+            except json.JSONDecodeError:
+                lines.append("\n*Could not parse serialized dashboard JSON.*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting dashboard '{dashboard_id}': {str(e)}"
+
+
+def create_lakeview_dashboard(display_name: str, serialized_dashboard: str, warehouse_id: Optional[str] = None) -> str:
+    """Creates a Lakeview dashboard from a serialized dashboard JSON string."""
+    try:
+        d = sdk_client.lakeview.create(Dashboard(
+            display_name=display_name,
+            serialized_dashboard=serialized_dashboard,
+            warehouse_id=warehouse_id or DATABRICKS_SQL_WAREHOUSE_ID,
+        ))
+        lines = [f"# Dashboard Created: {d.display_name}", ""]
+        lines.append(f"- **ID**: `{d.dashboard_id}`")
+        if d.path:
+            lines.append(f"- **Path**: `{d.path}`")
+        host = DATABRICKS_HOST.rstrip('/')
+        lines.append(f"- **Edit URL**: {host}/dashboardsv3/{d.dashboard_id}")
+        lines.append("\nUse `publish_lakeview_dashboard` to make it accessible to others.")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error creating dashboard: {str(e)}"
+
+
+def create_table_dashboard(display_name: str, sql_query: str, warehouse_id: Optional[str] = None,
+                           dataset_display_name: Optional[str] = None, table_title: Optional[str] = None) -> str:
+    """Creates a Lakeview dashboard with a single table visualization from a SQL query."""
+    ds_label = dataset_display_name or display_name
+    tbl_title = table_title or display_name
+    serialized = _build_table_dashboard_json(sql_query, ds_label, tbl_title)
+    return create_lakeview_dashboard(display_name, serialized, warehouse_id)
+
+
+def create_multi_widget_dashboard(display_name: str, widgets: List[Dict[str, Any]],
+                                   warehouse_id: Optional[str] = None) -> str:
+    """
+    Creates a Lakeview dashboard with multiple widgets on a single page.
+
+    Each item in `widgets` is a dict with keys:
+      type        : "counter" | "bar" | "line" | "area" | "scatter" | "pie"
+      sql_query   : SQL string for this widget's dataset
+      title       : Widget title
+      value_field : (counter only) column to display as the metric
+      x_field     : (chart only) column for x axis
+      y_field     : (chart only) column for y axis
+      description : (counter, optional) subtitle
+      agg_fn      : (counter, optional) SUM (default), MAX, MIN, COUNT
+      x, y, w, h  : grid position and size (grid is 6 wide; counters default h=3, charts h=6)
+    """
+    page_name = f"page_{uuid.uuid4().hex[:8]}"
+    datasets = []
+    layout = []
+
+    for i, wspec in enumerate(widgets):
+        wtype = wspec["type"]
+        ds_name = f"ds_{uuid.uuid4().hex[:8]}"
+        wname = f"w_{uuid.uuid4().hex[:8]}"
+        sql = wspec["sql_query"]
+        title = wspec.get("title", f"Widget {i+1}")
+
+        datasets.append({"name": ds_name, "displayName": title, "query": sql})
+
+        default_h = 3 if wtype == "counter" else 6
+        pos = {"x": wspec.get("x", 0), "y": wspec.get("y", i * 6),
+               "width": wspec.get("w", 6), "height": wspec.get("h", default_h)}
+
+        if wtype == "counter":
+            field = wspec["value_field"]
+            agg_fn = wspec.get("agg_fn", "SUM")
+            agg_field_name = f"{agg_fn.lower()}({field})"
+            agg_expression = f"{agg_fn}(`{field}`)"
+            frame: Dict[str, Any] = {"showTitle": True, "title": title}
+            if wspec.get("description"):
+                frame["showDescription"] = True
+                frame["description"] = wspec["description"]
+            entry = {
+                "widget": {
+                    "name": wname,
+                    "queries": [{"name": "main_query", "query": {
+                        "datasetName": ds_name,
+                        "fields": [{"name": agg_field_name, "expression": agg_expression}],
+                        "disaggregated": False,
+                    }}],
+                    "spec": {
+                        "version": 2,
+                        "widgetType": "counter",
+                        "encodings": {"value": {"fieldName": agg_field_name, "displayName": title}},
+                        "frame": frame,
+                    }
+                },
+                "position": pos
+            }
+        else:
+            xf = wspec["x_field"]
+            yf = wspec["y_field"]
+            entry = {
+                "widget": {
+                    "name": wname,
+                    "queries": [{"name": "main_query", "query": {
+                        "datasetName": ds_name,
+                        "fields": [
+                            {"name": xf, "expression": f"`{xf}`"},
+                            {"name": yf, "expression": f"`{yf}`"},
+                        ],
+                        "disaggregated": True,
+                    }}],
+                    "spec": {
+                        "version": 3,
+                        "widgetType": wtype,
+                        "encodings": {
+                            "x": {"fieldName": xf, "displayName": xf,
+                                  "axis": {"title": xf}, "scale": {"type": "categorical"}},
+                            "y": {"fieldName": yf, "displayName": yf,
+                                  "axis": {"title": yf}, "scale": {"type": "quantitative"}},
+                        },
+                        "frame": {"showTitle": True, "title": title},
+                    }
+                },
+                "position": pos
+            }
+
+        layout.append(entry)
+
+    dashboard_def = {
+        "datasets": datasets,
+        "pages": [{"name": page_name, "displayName": "Overview", "layout": layout}]
+    }
+    return create_lakeview_dashboard(display_name, json.dumps(dashboard_def), warehouse_id)
+
+
+def create_counter_dashboard(display_name: str, sql_query: str, value_field: str,
+                              warehouse_id: Optional[str] = None,
+                              dataset_display_name: Optional[str] = None,
+                              title: Optional[str] = None,
+                              description: Optional[str] = None) -> str:
+    """Creates a Lakeview dashboard with a single counter (KPI metric) widget."""
+    serialized = _build_counter_dashboard_json(
+        sql_query=sql_query,
+        value_field=value_field,
+        dataset_display_name=dataset_display_name or display_name,
+        title=title or display_name,
+        description=description,
+    )
+    return create_lakeview_dashboard(display_name, serialized, warehouse_id)
+
+
+def create_chart_dashboard(display_name: str, sql_query: str, chart_type: str,
+                            x_field: str, y_field: str,
+                            warehouse_id: Optional[str] = None,
+                            dataset_display_name: Optional[str] = None,
+                            title: Optional[str] = None,
+                            color_field: Optional[str] = None) -> str:
+    """Creates a Lakeview dashboard with a bar/line/area/scatter/pie chart widget."""
+    serialized = _build_chart_dashboard_json(
+        sql_query=sql_query,
+        chart_type=chart_type,
+        x_field=x_field,
+        y_field=y_field,
+        dataset_display_name=dataset_display_name or display_name,
+        title=title or display_name,
+        color_field=color_field,
+    )
+    return create_lakeview_dashboard(display_name, serialized, warehouse_id)
+
+
+def publish_lakeview_dashboard(dashboard_id: str, warehouse_id: Optional[str] = None) -> str:
+    """Publishes a Lakeview dashboard draft so it is accessible to viewers."""
+    try:
+        pub = sdk_client.lakeview.publish(
+            dashboard_id=dashboard_id,
+            warehouse_id=warehouse_id or DATABRICKS_SQL_WAREHOUSE_ID,
+            embed_credentials=True,
+        )
+        host = DATABRICKS_HOST.rstrip('/')
+        lines = ["# Dashboard Published", ""]
+        lines.append(f"- **Published URL**: {host}/dashboardsv3/{dashboard_id}/published")
+        if pub.warehouse_id:
+            lines.append(f"- **Warehouse**: `{pub.warehouse_id}`")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error publishing dashboard '{dashboard_id}': {str(e)}"
+
+
+def trash_lakeview_dashboard(dashboard_id: str) -> str:
+    """Moves a Lakeview dashboard to trash."""
+    try:
+        sdk_client.lakeview.trash(dashboard_id=dashboard_id)
+        return f"Dashboard `{dashboard_id}` moved to trash."
+    except Exception as e:
+        return f"Error trashing dashboard '{dashboard_id}': {str(e)}"
+
 
 def get_uc_all_catalogs_summary() -> str:
     """
     Fetches a summary of all available Unity Catalogs, including their names, comments, and types.
-    Uses the global SDK client.
     """
     markdown_parts = ["# Available Unity Catalogs", ""]
     catalogs_found_count = 0
@@ -557,11 +953,11 @@ def get_uc_all_catalogs_summary() -> str:
             catalog_type_str = "N/A"
             if catalog_info.catalog_type and hasattr(catalog_info.catalog_type, 'value'):
                 catalog_type_str = catalog_info.catalog_type.value
-            elif catalog_info.catalog_type: # Fallback if it's not an Enum but has a direct string representation
+            elif catalog_info.catalog_type:
                 catalog_type_str = str(catalog_info.catalog_type)
             markdown_parts.append(f"  - **Type**: `{catalog_type_str}`")
             
-            markdown_parts.append("") # Add a blank line for separation
+            markdown_parts.append("")
 
     except Exception as e:
         error_message = f"Failed to retrieve catalog list: {str(e)}"
@@ -574,4 +970,3 @@ def get_uc_all_catalogs_summary() -> str:
 ```"""
     
     return "\n".join(markdown_parts)
-
