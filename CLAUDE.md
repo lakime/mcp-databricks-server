@@ -67,6 +67,6 @@ Required env vars: `DATABRICKS_HOST`, `DATABRICKS_SQL_WAREHOUSE_ID`, and one of 
 After every feature is complete, always:
 
 1. Commit the changes with a descriptive message.
-2. Push to `origin/main` (`git push`).
+2. Push to `lakime main` (`git push lakime main`). Never push to `origin` (that points to `RafaelCartenet/mcp-databricks-server` — write access is denied and pushes there are forbidden).
 
 Do this without waiting to be asked.
