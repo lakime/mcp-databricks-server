@@ -1101,6 +1101,19 @@ def stop_app(app_name: str) -> str:
         return f"Error stopping app '{app_name}': {str(e)}"
 
 
+def get_app_logs(app_name: str) -> str:
+    """Fetches runtime logs for a Databricks App via the REST API."""
+    try:
+        resp = sdk_client.apps._api.do("GET", f"/api/2.0/apps/{app_name}/logs")
+        logs_text = resp.get("logs", "") if resp else ""
+        if not logs_text:
+            return f"# Logs: `{app_name}`\n\n*No log output available.*"
+        lines = ["# Logs: `{}`".format(app_name), "", "```", logs_text.rstrip(), "```"]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error fetching logs for app '{app_name}': {str(e)}"
+
+
 def get_uc_all_catalogs_summary() -> str:
     """
     Fetches a summary of all available Unity Catalogs, including their names, comments, and types.

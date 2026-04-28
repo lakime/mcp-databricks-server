@@ -31,6 +31,7 @@ from databricks_sdk_utils import (
     get_app_deployment,
     start_app,
     stop_app,
+    get_app_logs,
 )
 
 
@@ -590,6 +591,23 @@ async def stop_databricks_app(app_name: str) -> str:
         return await asyncio.to_thread(stop_app, app_name)
     except Exception as e:
         return f"Error stopping app '{app_name}': {str(e)}"
+
+
+@mcp.tool()
+async def get_databricks_app_logs(app_name: str) -> str:
+    """
+    Fetches the runtime logs of a running Databricks App.
+
+    Use this tool to inspect stdout/stderr output, errors, or startup messages
+    from a Databricks App.
+
+    Args:
+        app_name: The name of the app (e.g. `my-app`).
+    """
+    try:
+        return await asyncio.to_thread(get_app_logs, app_name)
+    except Exception as e:
+        return f"Error fetching logs for app '{app_name}': {str(e)}"
 
 
 if __name__ == "__main__":
