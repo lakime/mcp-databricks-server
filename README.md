@@ -7,6 +7,9 @@
 - [Overview](#overview)
 - [Practical Benefits of UC Metadata for AI Agents](#practical-benefits-of-uc-metadata-for-ai-agents)
 - [Available Tools and Features](#available-tools-and-features)
+  - [Unity Catalog Tools](#unity-catalog-exploration-tools)
+  - [Lakeview Dashboard Tools](#lakeview-dashboard-tools)
+  - [Lakebase (Postgres) Tools](#lakebase-postgres-tools)
 - [Setup](#setup)
   - [System Requirements](#system-requirements)
   - [Installation](#installation)
@@ -101,6 +104,88 @@ The server provides the following tools for navigating and understanding your Un
     *   **When to use**: When you need to run specific SQL queries, such as SELECT, SHOW, or other DQL statements.
     *   **Args**:
         *   `sql`: The complete SQL query string to execute.
+
+## Lakeview Dashboard Tools
+
+This server can create, publish, and manage **Lakeview (AI/BI) dashboards** directly from conversation context.
+
+| Tool | Description |
+|---|---|
+| `list_dashboards()` | List all Lakeview dashboards with IDs and lifecycle states |
+| `get_dashboard(dashboard_id)` | Inspect a dashboard's datasets and page structure |
+| `create_dashboard(display_name, serialized_dashboard, warehouse_id?)` | Create from a raw JSON definition |
+| `create_table_dashboard(display_name, sql_query, ...)` | One-liner: SQL query → table widget dashboard |
+| `create_counter_dashboard(display_name, sql_query, value_field, ...)` | One-liner: SQL query → KPI metric card |
+| `create_chart_dashboard(display_name, sql_query, chart_type, x_field, y_field, ...)` | One-liner: SQL query → bar / line / area / scatter / pie chart |
+| `create_multi_widget_dashboard(display_name, widgets, warehouse_id?)` | Compose multiple counters + charts on a single page |
+| `publish_dashboard(dashboard_id, warehouse_id?)` | Publish a draft dashboard so viewers can access it |
+| `trash_dashboard(dashboard_id)` | Soft-delete a dashboard |
+
+### Counter widget note
+
+Lakeview counter (KPI) widgets require spec `version: 2` and a real aggregation expression
+(`SUM(\`field\`)`, `COUNT(\`*\`)`, etc.) with `disaggregated: false` in the widget query —
+plain column references do not render. All `create_counter_dashboard` / `create_multi_widget_dashboard`
+calls apply `SUM` by default (configurable via `agg_fn`). Since the dataset SQL is already
+pre-aggregated, `SUM` of a single row returns the same value.
+
+## Lakebase (Postgres) Tools
+
+[Lakebase](https://docs.databricks.com/en/lakebase/index.html) is Databricks' managed Postgres
+service. It stores both synced Gold tables (read-only replicas from Delta Lake) and native
+agent-state tables (email threads, PO drafts, budget ledger, etc.).
+
+Auth uses a **short-lived OAuth token as the Postgres password**, obtained via the
+`sdk_client.postgres.generate_database_credential()` SDK call. Tokens are cached and
+refreshed automatically 60 seconds before expiry.
+
+### Additional environment variables
+
+```env
+# Postgres connection
+PGHOST=<lakebase-host>
+PGDATABASE=<database-name>
+PGUSER=<username>
+PGPORT=5432                    # optional, default 5432
+PG_SCHEMA=<default-schema>     # optional, sets search_path
+
+# Lakebase resource path
+LAKEBASE_PROJECT=<project-name>    # e.g. myzerobus
+LAKEBASE_BRANCH=<branch-name>      # e.g. production
+LAKEBASE_ENDPOINT=<endpoint-name>  # e.g. primary
+```
+
+All six Lakebase variables are **optional** — if any are missing the tools return an informative
+message rather than crashing the server.
+
+### Tools
+
+| Tool | Description |
+|---|---|
+| `lakebase_query(sql, schema?)` | Run any SQL (SELECT / INSERT / UPDATE / DELETE) against Lakebase Postgres |
+| `lakebase_list_schemas()` | List all user-visible schemas (excludes system schemas) |
+| `lakebase_list_tables(schema_name?)` | List tables and views in a schema |
+| `lakebase_describe_table(table_name, schema_name?)` | Get column definitions, nullability, PK, and defaults |
+
+### Example
+
+```
+lakebase_list_schemas()
+→ - `procurement`  - `public`
+
+lakebase_list_tables(schema_name="procurement")
+→ - email_inbox (table)  - po_drafts (table)  - budget_ledger (table) ...
+
+lakebase_describe_table("po_drafts", schema_name="procurement")
+→ | Column | Type | Nullable | PK | Default |
+  | po_id  | uuid | NO       | ✓  |         |
+  | ...
+
+lakebase_query("SELECT status, COUNT(*) FROM procurement.po_drafts GROUP BY status")
+→ | status   | count |
+  | DRAFT    | 12    |
+  | APPROVED | 4     |
+```
 
 ## Setup
 
@@ -303,4 +388,4 @@ The `execute_sql_query` tool utilizes the Databricks SDK's `execute_statement` m
 -   `mcp[cli]`: The Model Context Protocol library.
 -   `asyncio`: For asynchronous operations within the MCP server.
 -   `httpx` (typically a sub-dependency of `databricks-sdk` or `mcp`): For making HTTP requests.
-
+-   `psycopg2-binary`: For connecting to Lakebase (Databricks-managed Postgres).

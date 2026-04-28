@@ -2,6 +2,12 @@ from typing import Optional
 import asyncio
 from mcp.server.fastmcp import FastMCP
 from databricks_formatter import format_query_results
+from lakebase_utils import (
+    execute_lakebase_query,
+    list_lakebase_schemas,
+    list_lakebase_tables,
+    describe_lakebase_table,
+)
 from databricks_sdk_utils import (
     get_uc_table_details,
     get_uc_catalog_details,
@@ -176,6 +182,69 @@ async def list_uc_catalogs() -> str:
         return f"Error listing catalogs: {str(e)}"
 
 @mcp.tool()
+async def lakebase_query(sql: str, schema: Optional[str] = None) -> str:
+    """
+    Executes a SQL query against Lakebase (Databricks-managed Postgres) and returns
+    the results as a Markdown table.
+
+    Lakebase stores agent state and synced Gold tables as native Postgres tables.
+    Use this tool for INSERT / UPDATE / DELETE / SELECT against those tables.
+
+    Args:
+        sql: Any valid Postgres SQL statement.
+        schema: Optional schema to set as search_path before running the query.
+                Defaults to the PG_SCHEMA env var if set.
+    """
+    try:
+        return await asyncio.to_thread(execute_lakebase_query, sql, schema)
+    except Exception as e:
+        return f"Error executing Lakebase query: {str(e)}"
+
+
+@mcp.tool()
+async def lakebase_list_schemas() -> str:
+    """
+    Lists all user-visible schemas in Lakebase Postgres (excludes system schemas).
+
+    Use this as a starting point to discover what data is available in Lakebase.
+    """
+    try:
+        return await asyncio.to_thread(list_lakebase_schemas)
+    except Exception as e:
+        return f"Error listing Lakebase schemas: {str(e)}"
+
+
+@mcp.tool()
+async def lakebase_list_tables(schema_name: Optional[str] = None) -> str:
+    """
+    Lists tables and views in a Lakebase Postgres schema.
+
+    Args:
+        schema_name: Schema to inspect. Defaults to the PG_SCHEMA env var, then 'public'.
+    """
+    try:
+        return await asyncio.to_thread(list_lakebase_tables, schema_name)
+    except Exception as e:
+        return f"Error listing Lakebase tables: {str(e)}"
+
+
+@mcp.tool()
+async def lakebase_describe_table(table_name: str, schema_name: Optional[str] = None) -> str:
+    """
+    Returns column definitions (name, type, nullability, primary key, default) for a
+    Lakebase Postgres table.
+
+    Args:
+        table_name: Table name (without schema prefix).
+        schema_name: Schema containing the table. Defaults to PG_SCHEMA env var, then 'public'.
+    """
+    try:
+        return await asyncio.to_thread(describe_lakebase_table, table_name, schema_name)
+    except Exception as e:
+        return f"Error describing Lakebase table: {str(e)}"
+
+
+@mcp.tool()
 async def list_dashboards() -> str:
     """
     Lists all Lakeview dashboards in the Databricks workspace.
@@ -248,7 +317,7 @@ async def create_table_dashboard(
 
     Args:
         display_name: Human-readable name for the dashboard.
-        sql_query: The SQL query that populates the table.
+        sql_query: The SQL query that populates the table (e.g. `SELECT * FROM livezerobus.procurement.inventory_snapshot LIMIT 100`).
         warehouse_id: Optional SQL warehouse ID to attach.
         dataset_display_name: Optional label for the dataset (defaults to display_name).
         table_title: Optional title shown above the table widget (defaults to display_name).
@@ -374,7 +443,6 @@ async def create_multi_widget_dashboard(
       x_field     : (chart) column for x axis
       y_field     : (chart) column for y axis
       description : (counter, optional) subtitle text
-      agg_fn      : (counter, optional) aggregation to apply — SUM (default), MAX, MIN, COUNT
       x, y, w, h  : grid position/size (grid is 6 wide; counters default h=3, charts h=6)
 
     Example widgets list:
